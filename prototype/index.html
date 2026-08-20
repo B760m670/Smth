@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0d1218" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>slice — M0/M1</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Ctext y=%2213%22 font-size=%2213%22%3E%E2%9D%84%3C/text%3E%3C/svg%3E" />
+    <style>
+      :root {
+        --bg: #0d1218;
+        --panel: rgba(16, 22, 30, 0.82);
+        --line: rgba(120, 150, 180, 0.16);
+        --text: #cddae6;
+        --dim: #6f8296;
+        --accent: #6fd3ff;
+      }
+
+      * { box-sizing: border-box; }
+
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--text);
+        font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        -webkit-font-smoothing: antialiased;
+        /* A game surface, not a document: no pull-to-refresh, no double-tap
+           zoom, no text selection when a thumb drags across the HUD. */
+        touch-action: none;
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      #viewport { display: block; width: 100%; height: 100%; cursor: crosshair; }
+
+      #hud {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+      }
+
+      .panel {
+        position: absolute;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 12px;
+        backdrop-filter: blur(8px);
+        pointer-events: auto;
+      }
+
+      .stats { top: 14px; left: 14px; min-width: 178px; }
+      .net   { top: 14px; right: 14px; width: 236px; }
+      .help  { bottom: 14px; left: 14px; color: var(--dim); line-height: 1.7; }
+
+      .row { display: flex; justify-content: space-between; gap: 12px; }
+      .row .key { color: var(--dim); }
+      .row .val { color: var(--text); font-variant-numeric: tabular-nums; }
+      .row .val.warn { color: #ffcf70; }
+      .row .val.bad  { color: #ff6b6b; }
+
+      .title {
+        color: var(--dim);
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+        font-size: 10px;
+        margin-bottom: 8px;
+      }
+
+      .slider { margin-bottom: 8px; }
+      .slider .key { color: var(--dim); float: left; }
+      .slider .val { float: right; font-variant-numeric: tabular-nums; }
+      .slider input {
+        clear: both;
+        display: block;
+        width: 100%;
+        margin-top: 4px;
+        accent-color: var(--accent);
+      }
+
+      .presets { display: flex; gap: 4px; margin: 10px 0 8px; }
+      .presets button {
+        flex: 1;
+        background: rgba(110, 150, 190, 0.12);
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        color: var(--text);
+        font: inherit;
+        font-size: 10px;
+        padding: 4px 0;
+        cursor: pointer;
+      }
+      .presets button:hover { background: rgba(110, 190, 240, 0.24); }
+
+      .checkbox { display: flex; align-items: center; gap: 6px; color: var(--dim); }
+      .checkbox input { accent-color: var(--accent); }
+
+      /* ---- ability bar ---- */
+      .bar {
+        position: absolute;
+        bottom: 22px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 10px;
+        pointer-events: auto;
+      }
+
+      .slot {
+        --accent: #6fd3ff;
+        --cooldown: 0deg;
+        position: relative;
+        width: 92px;
+        height: 62px;
+        padding: 6px 8px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        cursor: pointer;
+        overflow: hidden;
+        transition: border-color 0.12s, transform 0.12s;
+      }
+      .slot:hover { transform: translateY(-2px); }
+      .slot.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+
+      /* The sweep is a conic-gradient driven by a custom property: updating it
+         every frame is one setProperty and never touches layout. */
+      .slot .sweep {
+        position: absolute;
+        inset: 0;
+        background: conic-gradient(rgba(6, 10, 14, 0.78) var(--cooldown), transparent 0);
+        pointer-events: none;
+        opacity: 0;
+      }
+      .slot.cooling .sweep { opacity: 1; }
+
+      .slot .key {
+        color: var(--accent);
+        font-weight: 700;
+        font-size: 13px;
+      }
+      .slot .name {
+        position: absolute;
+        left: 8px;
+        right: 8px;
+        bottom: 6px;
+        color: var(--dim);
+        font-size: 10px;
+        line-height: 1.25;
+      }
+
+      /* ---- toast ---- */
+      .toast {
+        position: absolute;
+        top: 42%;
+        left: 50%;
+        transform: translate(-50%, -6px);
+        padding: 7px 16px;
+        background: rgba(12, 17, 23, 0.9);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        opacity: 0;
+        transition: opacity 0.18s, transform 0.18s;
+        pointer-events: none;
+        white-space: nowrap;
+      }
+      .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+      /* ---- touch: the floating stick ---- */
+      .stick {
+        position: absolute;
+        width: 132px;
+        height: 132px;
+        margin: -66px 0 0 -66px;
+        border: 1px solid rgba(140, 190, 230, 0.28);
+        border-radius: 50%;
+        background: rgba(20, 30, 40, 0.28);
+        opacity: 0;
+        transition: opacity 0.12s;
+        pointer-events: none;
+      }
+      .stick.show { opacity: 1; }
+      .knob {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 54px;
+        height: 54px;
+        margin: -27px 0 0 -27px;
+        border-radius: 50%;
+        background: rgba(120, 200, 245, 0.35);
+        border: 1px solid rgba(160, 215, 250, 0.5);
+      }
+
+      /* ---- phone layout ---- */
+      #hud.mobile .stats,
+      #hud.mobile .net,
+      #hud.mobile .help { display: none; }
+      #hud.mobile.panels .stats,
+      #hud.mobile.panels .net,
+      #hud.mobile.panels .help { display: block; }
+
+      #hud.mobile .stats {
+        top: calc(10px + env(safe-area-inset-top));
+        left: calc(10px + env(safe-area-inset-left));
+        transform: scale(0.92);
+        transform-origin: top left;
+      }
+      #hud.mobile .net {
+        top: calc(10px + env(safe-area-inset-top));
+        right: calc(56px + env(safe-area-inset-right));
+        width: 210px;
+      }
+      #hud.mobile .help {
+        bottom: calc(120px + env(safe-area-inset-bottom));
+        left: calc(10px + env(safe-area-inset-left));
+        right: calc(10px + env(safe-area-inset-right));
+      }
+
+      .toggle {
+        position: absolute;
+        top: calc(10px + env(safe-area-inset-top));
+        right: calc(10px + env(safe-area-inset-right));
+        width: 38px;
+        height: 38px;
+        border-radius: 50%;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        color: var(--text);
+        font: inherit;
+        font-size: 15px;
+        pointer-events: auto;
+      }
+
+      /* The bar moves to the thumb: bottom-right, stacked, and big enough to
+         hit without looking. A row centred at the bottom is a desktop layout —
+         on a phone the left half of it is under the walking thumb. */
+      #hud.mobile .bar {
+        left: auto;
+        transform: none;
+        right: calc(12px + env(safe-area-inset-right));
+        bottom: calc(18px + env(safe-area-inset-bottom));
+        flex-direction: column-reverse;
+        gap: 8px;
+      }
+      #hud.mobile .slot {
+        width: 82px;
+        height: 68px;
+      }
+      #hud.mobile .slot:hover { transform: none; }
+      #hud.mobile .toast { top: 30%; }
+    </style>
+  </head>
+  <body>
+    <canvas id="viewport"></canvas>
+    <div id="hud"></div>
+    <script type="module" src="/client/main.ts"></script>
+  </body>
+</html>
