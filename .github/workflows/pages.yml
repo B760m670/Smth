@@ -49,5 +49,55 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      # Pages cannot be deployed into until it exists, and it does not exist
+      # until somebody turns it on. Try to turn it on with the token this
+      # workflow already has; if that is not permitted, print exactly what to
+      # tap and stop *without failing*.
+      #
+      # Failing here would be dishonest twice over: the build is fine — its
+      # artifact is attached to this very run — and the missing piece is a
+      # repository setting no amount of pushing will fix. A red X on every push
+      # for something CI cannot do is how people learn to ignore CI.
+      - name: Ensure Pages is enabled
+        id: pages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Actions starts this shell with -e. Turn that off on purpose: the
+          # entire job of this step is to *detect* a failure and report it
+          # calmly, and under -e the first non-zero probe would kill the step
+          # before it could. (`[ cond ] && cmd` with a false cond is exactly
+          # that trap.)
+          set +e
+          set -uo pipefail
+
+          api="https://api.github.com/repos/$REPO/pages"
+          auth=(-H "Authorization: Bearer $GH_TOKEN"
+                -H "Accept: application/vnd.github+json"
+                -H "X-GitHub-Api-Version: 2022-11-28")
+
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "${auth[@]}" "$api")
+          echo "GET /pages -> ${code:-no response}"
+
+          if [ "${code:-000}" != "200" ]; then
+            echo "Pages is not configured yet — attempting to enable it."
+            code=$(curl -sS -o /tmp/pages.json -w '%{http_code}' -X POST "${auth[@]}" \
+              -d '{"build_type":"workflow"}' "$api")
+            echo "POST /pages -> ${code:-no response}"
+            cat /tmp/pages.json 2>/dev/null
+            echo
+            # A freshly created site takes a moment to become deployable.
+            if [ "${code:-000}" = "201" ]; then sleep 5; fi
+          fi
+
+          if [ "$code" = "200" ] || [ "$code" = "201" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=GitHub Pages is not enabled::Turn it on once at Settings -> Pages -> Source: GitHub Actions, then re-run this workflow. The build succeeded; its artifact is attached to this run."
+          fi
+
       - id: deploy
+        if: steps.pages.outputs.ready == 'true'
         uses: actions/deploy-pages@v4
