@@ -13,6 +13,7 @@
 
 import type { NetSim } from './net.ts';
 import type { AbilityProfile } from '../shared/profiles.ts';
+import { mobile } from './quality.ts';
 
 export interface HudState {
   fps: number;
@@ -53,6 +54,7 @@ export class Hud {
 
   constructor(root: HTMLElement, sim: NetSim) {
     root.innerHTML = '';
+    if (mobile) root.classList.add('mobile');
 
     /* ---- readouts ---- */
     const stats = div('panel stats', root);
@@ -115,9 +117,25 @@ export class Hud {
 
     /* ---- help ---- */
     const help = div('panel help', root);
-    help.innerHTML =
-      '<b>WASD</b> move &nbsp; <b>mouse</b> aim &nbsp; <b>click</b> cast<br>' +
-      '<b>1 2 3</b> pick a profile &nbsp; open a second tab for a second player';
+    help.innerHTML = mobile
+      ? '<b>left thumb</b> walk &nbsp; <b>hold an ability</b> to aim, release to cast<br>' +
+        'slide back onto the button to cancel'
+      : '<b>WASD</b> move &nbsp; <b>mouse</b> aim &nbsp; <b>click</b> cast<br>' +
+        '<b>1 2 3</b> pick a profile &nbsp; open a second tab for a second player';
+
+    // On a phone the two panels would cover most of the playfield, so they fold
+    // away behind one tap. They are instrumentation, not chrome — but they are
+    // no use at all if they are sitting on top of the thing being measured.
+    if (mobile) {
+      const toggle = document.createElement('button');
+      toggle.className = 'toggle';
+      toggle.textContent = 'i';
+      toggle.addEventListener('click', () => {
+        const shown = root.classList.toggle('panels');
+        toggle.textContent = shown ? '×' : 'i';
+      });
+      root.appendChild(toggle);
+    }
   }
 
   private applyPreset(sim: NetSim, latency: number, jitter: number, loss: number): void {

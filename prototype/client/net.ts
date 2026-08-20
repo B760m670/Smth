@@ -17,6 +17,25 @@
  */
 
 import { Msg, Reader, Writer } from '../shared/protocol.ts';
+import { LocalServer } from './localServer.ts';
+
+/**
+ * Where the session lives.
+ *
+ * `remote` is a real server over a socket. `local` runs the identical
+ * `Session` inside this tab against bots — same protocol, same tick, same
+ * simulator in front of it. See `localServer.ts`.
+ */
+export type Endpoint =
+  | { kind: 'remote'; url: string }
+  | { kind: 'local'; bots: number };
+
+/** The two things `Net` needs from whatever it is talking to. */
+interface Pipe {
+  readonly open: boolean;
+  send(bytes: Uint8Array): void;
+  close(): void;
+}
 
 export interface NetSim {
   /** One-way delay, ms. Round trip is roughly twice this. */
@@ -47,7 +66,7 @@ export class Net {
   private offset = 0;
   private clockReady = false;
 
-  private socket: WebSocket | null = null;
+  private pipe: Pipe | null = null;
   private inbound: Queued[] = [];
   private outbound: Queued[] = [];
   private handler: PacketHandler = () => {};
@@ -60,7 +79,7 @@ export class Net {
   }
 
   get connected(): boolean {
-    return this.socket?.readyState === WebSocket.OPEN;
+    return this.pipe?.open ?? false;
   }
 
   get clockSynced(): boolean {
@@ -72,37 +91,63 @@ export class Net {
     return performance.now() + this.offset;
   }
 
-  connect(url: string, name: string): Promise<void> {
+  connect(endpoint: Endpoint, name: string): Promise<void> {
+    const greeting = new Writer(64).u8(Msg.C_HELLO).str(name).finish();
+
+    // The greeting bypasses the simulator on purpose. Dropping it would leave
+    // the connection open and the session unstarted, which is a simulator bug
+    // wearing a network bug's clothes.
+    if (endpoint.kind === 'local') {
+      const server = new LocalServer(endpoint.bots);
+      let open = true;
+      server.open((bytes) => this.receive(bytes));
+      this.pipe = {
+        get open() {
+          return open;
+        },
+        send: (bytes) => server.fromClient(bytes),
+        close: () => {
+          open = false;
+          server.close();
+        }
+      };
+      server.fromClient(greeting);
+      return Promise.resolve();
+    }
+
     return new Promise((resolve, reject) => {
-      const socket = new WebSocket(url);
+      const socket = new WebSocket(endpoint.url);
       socket.binaryType = 'arraybuffer';
-      this.socket = socket;
+
+      this.pipe = {
+        get open() {
+          return socket.readyState === WebSocket.OPEN;
+        },
+        send: (bytes) => socket.send(bytes),
+        close: () => socket.close()
+      };
 
       socket.onopen = () => {
-        // The greeting bypasses the simulator. Dropping it would leave the
-        // socket open and the session unstarted, which is a simulator bug
-        // wearing a network bug's clothes.
-        socket.send(new Writer(64).u8(Msg.C_HELLO).str(name).finish());
+        socket.send(greeting);
         resolve();
       };
-
-      socket.onerror = () => reject(new Error(`cannot reach ${url}`));
-
-      socket.onmessage = (event: MessageEvent<ArrayBuffer>) => {
-        const data = new Uint8Array(event.data);
-        this.stats.bytesIn += data.byteLength;
-
-        if (Math.random() < this.sim.loss) {
-          this.stats.dropped++;
-          return;
-        }
-        this.inbound.push({ due: performance.now() + this.delay(), data });
-      };
-
+      socket.onerror = () => reject(new Error(`cannot reach ${endpoint.url}`));
+      socket.onmessage = (event: MessageEvent<ArrayBuffer>) => this.receive(new Uint8Array(event.data));
       socket.onclose = () => {
-        this.socket = null;
+        this.pipe = null;
       };
     });
+  }
+
+  /** Everything arriving from the session, socket or local, lands here. */
+  private receive(data: Uint8Array): void {
+    this.stats.bytesIn += data.byteLength;
+
+    if (Math.random() < this.sim.loss) {
+      this.stats.dropped++;
+      return;
+    }
+    this.inbound.push({ due: performance.now() + this.delay(), data });
   }
 
   private delay(): number {
@@ -135,7 +180,7 @@ export class Net {
       while (this.outbound.length > 0 && this.outbound[0]!.due <= now) {
         const packet = this.outbound.shift()!;
         this.stats.bytesOut += packet.data.byteLength;
-        this.socket?.send(packet.data);
+        this.pipe?.send(packet.data);
       }
     }
 

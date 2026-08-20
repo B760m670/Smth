@@ -9,6 +9,7 @@
 import { Plane, Raycaster, Vector2, Vector3 } from 'three';
 
 import { Stage } from './render/scene.ts';
+import { AimView } from './render/aimView.ts';
 import { Actor, ServerGhost } from './render/actors.ts';
 import { CastView } from './render/castView.ts';
 import { createCrystalGeometry } from './render/crystal.ts';
@@ -16,6 +17,9 @@ import { Net } from './net.ts';
 import { Predictor } from './prediction.ts';
 import { RemoteBuffer } from './remotes.ts';
 import { Hud } from './ui.ts';
+import { TouchControls } from './touch.ts';
+import { isTouch } from './quality.ts';
+import type { Endpoint } from './net.ts';
 
 import { INPUT_DT, MAX_HP } from '../shared/constants.ts';
 import { Msg, REJECT_TEXT, Reader, Writer, readCast } from '../shared/protocol.ts';
@@ -42,6 +46,19 @@ hud.onGhostToggle = (visible) => {
 };
 // Let the clock re-converge when the simulated route changes underneath it.
 hud.onSimChange = () => net.resetClock();
+
+const aimView = new AimView();
+aimView.addTo(stage.scene);
+
+/**
+ * On a phone, both thumbs. On a desktop, nothing — the mouse path below is
+ * untouched, and this is null.
+ */
+const touch = isTouch ? new TouchControls(hudRoot) : null;
+if (touch) {
+  touch.onSelect = (slot) => hud.select(slot);
+  touch.onCast = (slot) => attemptCast(slot);
+}
 
 /** One geometry for every crystal in the world. */
 const crystalGeometry = createCrystalGeometry({ seed: 7.3, sides: 6, taper: 0.13, roughness: 0.3, bend: 0.2 });
@@ -85,13 +102,61 @@ window.addEventListener('pointermove', (event) => {
 });
 
 canvas.addEventListener('pointerdown', (event) => {
+  // Touch casts from the ability buttons, not from the world, so a tap on the
+  // ground must not also throw a spell.
+  if (event.pointerType !== 'mouse') return;
   if (event.button === 0) attemptCast();
 });
 
-/** Re-project the cursor every frame, not only on move: the camera drifts. */
+/**
+ * Where the cast is pointed, resolved fresh every frame.
+ *
+ * Two sources, one answer. The mouse projects the cursor onto the ground —
+ * re-projected every frame rather than only on move, because the camera drifts under
+ * a stationary cursor. A thumb has no cursor to project, so its drag vector
+ * becomes a direction and a fraction of the ability's range directly.
+ */
 function updateAim(): void {
+  const profile = selectedProfile();
+
+  if (touch?.aiming && profile) {
+    const reach = profile.minRange + (profile.range - profile.minRange) * touch.aim.reach;
+    aimPoint.set(
+      predictor.state.x + touch.aim.x * reach,
+      0,
+      predictor.state.z + touch.aim.z * reach
+    );
+    return;
+  }
+
   raycaster.setFromCamera(pointer, stage.camera);
   if (!raycaster.ray.intersectPlane(GROUND, aimPoint)) aimPoint.set(0, 0, 0);
+}
+
+/** Draw the band the cast would sweep, in the colour of whether it is legal. */
+function updateAimView(): void {
+  const profile = selectedProfile();
+  // On a phone the indicator belongs to the drag; on a desktop the cursor is
+  // always aiming something, so it is always up.
+  const wanted = touch ? touch.aiming && !touch.aim.cancelling : true;
+
+  if (!profile || !wanted || !selfAlive || !net.connected) {
+    aimView.hide();
+    return;
+  }
+
+  const dx = aimPoint.x - predictor.state.x;
+  const dz = aimPoint.z - predictor.state.z;
+  const raw = Math.hypot(dx, dz);
+
+  aimView.show(
+    profile,
+    predictor.state.x,
+    predictor.state.z,
+    Math.atan2(dx, dz),
+    clamp(raw, profile.minRange, profile.range),
+    raw >= profile.minRange
+  );
 }
 
 function selectedProfile(): AbilityProfile | null {
@@ -111,8 +176,9 @@ function selectedProfile(): AbilityProfile | null {
  * it describes the *same* field, so `adopt` nudges the origin and start time
  * rather than replacing the spell with a different-looking one.
  */
-function attemptCast(): void {
-  const profile = selectedProfile();
+function attemptCast(slot: number = hud.selectedSlot): void {
+  const id = net.loadout[slot];
+  const profile = id === undefined ? null : profileById(id);
   if (!profile || !net.connected) return;
 
   if (!selfAlive) {
@@ -170,7 +236,7 @@ function attemptCast(): void {
     new Writer(32)
       .u8(Msg.C_CAST)
       .u32(seq)
-      .u8(hud.selectedSlot)
+      .u8(slot)
       .u32(seed)
       .cm(predictor.state.x)
       .cm(predictor.state.z)
@@ -397,9 +463,14 @@ function sampleInputs(dt: number): void {
     inputAccumulator -= INPUT_DT;
     sent++;
 
-    const moveX = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
-    // The camera looks down +Z, so forward on screen is −Z.
-    const moveZ = (keys.has('KeyS') ? 1 : 0) - (keys.has('KeyW') ? 1 : 0);
+    // The camera looks down +Z, so forward on screen is −Z. The stick already
+    // speaks in screen space, so it needs no translation.
+    let moveX = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
+    let moveZ = (keys.has('KeyS') ? 1 : 0) - (keys.has('KeyW') ? 1 : 0);
+    if (touch && (touch.move.x !== 0 || touch.move.z !== 0)) {
+      moveX = touch.move.x;
+      moveZ = touch.move.z;
+    }
 
     const yaw = Math.atan2(aimPoint.x - predictor.state.x, aimPoint.z - predictor.state.z);
     predictor.sample(INPUT_DT, moveX, moveZ, yaw);
@@ -432,6 +503,7 @@ function frame(): void {
 
   net.pump();
   updateAim();
+  updateAimView();
   sampleInputs(dt);
   expirePredictions();
 
@@ -499,17 +571,61 @@ declare global {
 
 window.slice = { net, predictor, remotes, casts, pending, cooldowns, hud, stage, aimPoint };
 
+/**
+ * Decide what this client is talking to.
+ *
+ *   ?local=1        run the session in this tab against bots — no server, no
+ *                   hosting, works from a static file. The point of this mode is
+ *                   a phone with nothing to connect to.
+ *   ?server=host    an explicit address.
+ *   otherwise       the origin that served this page, which is the deployed
+ *                   case: one process serves the client and owns the socket, so
+ *                   the two are same-origin by construction.
+ *
+ * The protocol has to follow the page's. A browser refuses a plain `ws://` from
+ * a page loaded over HTTPS, and every phone is on HTTPS — hardcoding `ws://` is
+ * the single most common reason a prototype that works on a laptop cannot be
+ * opened on a phone at all.
+ */
+function resolveEndpoint(params: URLSearchParams): Endpoint {
+  if (params.get('local') === '1') {
+    return { kind: 'local', bots: Number(params.get('bots') ?? 3) };
+  }
+
+  const secure = location.protocol === 'https:';
+  const scheme = secure ? 'wss' : 'ws';
+  const explicit = params.get('server');
+  if (explicit) return { kind: 'remote', url: `${scheme}://${explicit}` };
+
+  // Vite's dev server does not own the socket; the game server next door does.
+  if (location.port === '5173') return { kind: 'remote', url: `ws://${location.hostname}:8080` };
+
+  return { kind: 'remote', url: `${scheme}://${location.host}` };
+}
+
 async function boot(): Promise<void> {
   const params = new URLSearchParams(location.search);
-  const host = params.get('server') ?? `${location.hostname}:8080`;
+  const endpoint = resolveEndpoint(params);
   const name = params.get('name') ?? `Player ${Math.floor(Math.random() * 900 + 100)}`;
 
   try {
-    await net.connect(`ws://${host}`, name);
+    await net.connect(endpoint, name);
   } catch (error) {
-    hud.toast(`No server at ${host} — run "npm run dev:server"`);
-    console.error(error);
-    return;
+    // No server there. Rather than leave a dead page — which is what a static
+    // host with no backend would always be — fall back to running the session
+    // here. It is the same `Session` either way, so nothing about the game
+    // changes except that the other players are bots.
+    if (endpoint.kind === 'remote' && !params.get('server')) {
+      console.warn('no server, falling back to a local session:', error);
+      await net.connect({ kind: 'local', bots: Number(params.get('bots') ?? 3) }, name);
+      hud.toast('No server — playing locally against bots');
+    } else {
+      hud.toast(
+        endpoint.kind === 'remote' ? `Cannot reach ${endpoint.url}` : 'Could not start the local session'
+      );
+      console.error(error);
+      return;
+    }
   }
 
   // The loadout arrives with the welcome; wait a beat for it before building

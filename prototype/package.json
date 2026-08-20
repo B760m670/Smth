@@ -11,7 +11,9 @@
     "server": "node server/main.ts",
     "build": "vite build",
     "check": "tsc --noEmit",
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "start": "node server/main.ts",
+    "serve": "npm run build && node server/main.ts"
   },
   "dependencies": {
     "three": "^0.185.1",

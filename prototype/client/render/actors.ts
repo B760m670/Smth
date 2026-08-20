@@ -71,11 +71,11 @@ export class Actor {
     this.animator = new Animator(this.humanoid.bones, this.humanoid.proportions);
     this.group.add(this.humanoid.mesh);
 
-    const back = new Mesh(new BoxGeometry(0.9, 0.1, 0.02), new MeshBasicMaterial({ color: '#11161c' }));
+    const back = new Mesh(new BoxGeometry(0.78, 0.085, 0.02), new MeshBasicMaterial({ color: '#11161c' }));
     this.barGroup.add(back);
 
     this.barFill = new Mesh(
-      new BoxGeometry(0.9, 0.1, 0.03),
+      new BoxGeometry(0.78, 0.085, 0.03),
       new MeshBasicMaterial({ color: isSelf ? '#7ef0a8' : '#ff7a6f' })
     );
     this.barFill.position.z = 0.01;
@@ -131,7 +131,7 @@ export class Actor {
   setHealth(hp: number, alive: boolean): void {
     const t = Math.max(0, Math.min(1, hp / MAX_HP));
     this.barFill.scale.x = Math.max(0.001, t);
-    this.barFill.position.x = -(1 - t) * 0.45;
+    this.barFill.position.x = -(1 - t) * 0.39;
 
     if (alive === this.alive) return;
     this.alive = alive;

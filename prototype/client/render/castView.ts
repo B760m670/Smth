@@ -38,6 +38,7 @@ import type { CastData } from '../../shared/ability.ts';
 import type { AbilityProfile } from '../../shared/profiles.ts';
 import { mulberry32 } from '../../shared/rng.ts';
 import { lerp, saturate } from '../../shared/math.ts';
+import { quality } from '../quality.ts';
 
 /** Hard ceiling on crystals per cast, whatever the profile asks for. */
 const MAX_SPIKES = 320;
@@ -80,7 +81,10 @@ export class CastView {
     this.predicted = false;
     this.instance = new AbilityInstance(profile, cast);
 
-    const count = Math.min(MAX_SPIKES, Math.max(1, Math.round(profile.spikeCount)));
+    // Cosmetic only: how *many* crystals draw the band, never how wide it is or
+    // where it lands. A phone and a desktop must agree about the second even
+    // when they disagree about the first.
+    const count = Math.min(MAX_SPIKES, Math.max(8, Math.round(profile.spikeCount * quality.spikeScale)));
 
     // One material per cast. That is what makes a per-profile palette work at
     // all — two players on two ranks have two different colours on screen at

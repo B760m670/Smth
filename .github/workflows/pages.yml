@@ -1,0 +1,53 @@
+# Publishes the client to GitHub Pages on every push to the branch.
+#
+# Pages is a static host: there is no server, so the deployed page runs the
+# session in the tab against bots (see client/localServer.ts). That is the
+# whole point of this workflow — it means looking at the game needs a phone
+# and a URL, and nothing else. Multiplayer needs the process in server/main.ts
+# hosted somewhere; see prototype/README.md.
+name: pages
+
+on:
+  push:
+    branches: [main, claude/threejs-vfx-sandbox-p7pn2e]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: prototype
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: prototype/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: prototype/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
