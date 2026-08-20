@@ -1,0 +1,27 @@
+{
+  "name": "slice",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "M0/M1 vertical slice: authoritative server, client prediction, cast replication.",
+  "scripts": {
+    "dev": "concurrently -n server,client -c cyan,magenta \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "node --watch server/main.ts",
+    "dev:client": "vite",
+    "server": "node server/main.ts",
+    "build": "vite build",
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "three": "^0.185.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.0",
+    "@types/ws": "^8.5.13",
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.2",
+    "vite": "^8.1.5"
+  }
+}
