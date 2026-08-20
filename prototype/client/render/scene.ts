@@ -36,7 +36,7 @@ export class Stage {
 
   /** Where the rig wants to be looking. Eased toward every frame. */
   private target = new Vector3();
-  private offset = new Vector3(0, 13.5, 11.5);
+  private offset = new Vector3(0, 10.5, 9.0);
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });

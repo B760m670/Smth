@@ -1,20 +1,27 @@
 /**
- * Bodies: a capsule, a facing wedge, a health bar.
+ * Bodies: a skinned character, a health bar, and the server ghost.
  *
- * Plus one thing that is not decoration — the **server ghost**. It is a
- * wireframe capsule drawn at the position the server last reported for *you*,
- * next to the position you are predicting. When prediction is healthy the ghost
- * sits inside your body and is invisible; when the reconciliation is wrong, or
- * the input budget is clipping you, or the latency slider goes up, the ghost
- * separates and you can watch exactly how and when. Every networked game grows
- * this eventually; growing it on day one is cheaper than debugging without it.
+ * The character is generated (see `humanoid.ts`) and animated procedurally (see
+ * `animator.ts`). What lives here is the part that connects them to the
+ * network: turning a stream of positions — predicted for you, interpolated for
+ * everyone else — into the speed and distance the animator needs.
+ *
+ * That conversion is the only interesting thing in this file, and it has one
+ * trap in it. Positions do not always mean movement: a respawn teleports, a
+ * reconciliation can snap, and a late snapshot can arrive as a jump. Feeding
+ * those to a stride cycle makes the legs spin. Anything past `TELEPORT` metres
+ * in a frame is therefore treated as a cut, not a step.
+ *
+ * The **server ghost** stays: a wireframe capsule at the position the server
+ * last reported for you, next to the position you are predicting. When
+ * prediction is healthy it is invisible inside your body; when it is not, you
+ * can watch exactly how and when it separates.
  */
 
 import {
   BoxGeometry,
   CapsuleGeometry,
   Color,
-  ConeGeometry,
   Group,
   Mesh,
   MeshBasicMaterial,
@@ -23,58 +30,52 @@ import {
   type Scene
 } from 'three';
 import { ACTOR_RADIUS, MAX_HP } from '../../shared/constants.ts';
+import { createHumanoid, DEFAULT_PROPORTIONS, type Humanoid } from './humanoid.ts';
+import { Animator } from './animator.ts';
 
-const BODY_HEIGHT = 1.15;
-const BAR_HEIGHT = ACTOR_RADIUS * 2 + BODY_HEIGHT + 0.35;
+const BAR_HEIGHT = DEFAULT_PROPORTIONS.height + 0.32;
 
-const SELF_COLOR = new Color('#6fd3ff');
-const OTHER_COLOR = new Color('#ffb27a');
-const BOT_COLOR = new Color('#9aa6b4');
-const DEAD_COLOR = new Color('#39414c');
+/** Metres in one frame beyond which a position change is a cut, not a step. */
+const TELEPORT = 1.5;
+
+/** How long the throw gesture runs, seconds. */
+export const CAST_GESTURE = 0.62;
+
+const SELF_COLOR = new Color('#5fb8e8');
+const OTHER_COLOR = new Color('#e0865a');
+const BOT_COLOR = new Color('#7c8794');
+const DEAD_COLOR = new Color('#3b434d');
 
 export class Actor {
-  /** Body and facing wedge. Yawed with the character. */
+  /** The body. Yawed with the character. */
   readonly group = new Group();
-  /**
-   * The health bar, kept *out* of the yawed group on purpose: it is billboarded
-   * to the camera, and a billboard parented to a rotating node has to undo its
-   * parent's rotation every frame to stay flat. Separating them costs one
-   * position copy and removes the whole class of bug.
-   */
+  /** The health bar, billboarded — kept out of the yawed group deliberately. */
   readonly barGroup = new Group();
 
-  private body: Mesh;
-  private wedge: Mesh;
+  private humanoid: Humanoid;
+  private animator: Animator;
   private barFill: Mesh;
   private baseColor: Color;
+
+  private lastX = 0;
+  private lastZ = 0;
+  private seeded = false;
+  private castAge = -1;
 
   alive = true;
 
   constructor(isSelf: boolean, isBot: boolean) {
     this.baseColor = isSelf ? SELF_COLOR : isBot ? BOT_COLOR : OTHER_COLOR;
 
-    this.body = new Mesh(
-      new CapsuleGeometry(ACTOR_RADIUS, BODY_HEIGHT, 6, 14),
-      new MeshStandardMaterial({ color: this.baseColor, roughness: 0.55, metalness: 0.05 })
-    );
-    this.body.position.y = ACTOR_RADIUS + BODY_HEIGHT * 0.5;
-    this.body.castShadow = true;
-    this.group.add(this.body);
+    this.humanoid = createHumanoid(this.baseColor);
+    this.animator = new Animator(this.humanoid.bones, this.humanoid.proportions);
+    this.group.add(this.humanoid.mesh);
 
-    // Which way they are facing. Capsules are rotationally symmetric, and a
-    // cast that comes out of a featureless pill is impossible to read.
-    this.wedge = new Mesh(
-      new ConeGeometry(0.16, 0.5, 4).rotateX(Math.PI / 2),
-      new MeshStandardMaterial({ color: '#ffffff', roughness: 0.4 })
-    );
-    this.wedge.position.set(0, 1.0, ACTOR_RADIUS + 0.2);
-    this.group.add(this.wedge);
-
-    const back = new Mesh(new BoxGeometry(1.0, 0.11, 0.02), new MeshBasicMaterial({ color: '#11161c' }));
+    const back = new Mesh(new BoxGeometry(0.9, 0.1, 0.02), new MeshBasicMaterial({ color: '#11161c' }));
     this.barGroup.add(back);
 
     this.barFill = new Mesh(
-      new BoxGeometry(1.0, 0.11, 0.03),
+      new BoxGeometry(0.9, 0.1, 0.03),
       new MeshBasicMaterial({ color: isSelf ? '#7ef0a8' : '#ff7a6f' })
     );
     this.barFill.position.z = 0.01;
@@ -85,43 +86,76 @@ export class Actor {
     scene.add(this.group, this.barGroup);
   }
 
-  setTransform(x: number, z: number, yaw: number): void {
+  /**
+   * Place the body and advance its animation.
+   *
+   * Speed is derived rather than sent, which is the whole reason animation
+   * costs nothing on the wire: a remote body walks because its interpolated
+   * position is moving, and the interpolation already had to happen.
+   */
+  sync(x: number, z: number, yaw: number, dt: number): void {
+    if (!this.seeded) {
+      this.lastX = x;
+      this.lastZ = z;
+      this.seeded = true;
+    }
+
+    let travelled = Math.hypot(x - this.lastX, z - this.lastZ);
+    if (travelled > TELEPORT) travelled = 0;
+    this.lastX = x;
+    this.lastZ = z;
+
     this.group.position.set(x, 0, z);
     this.group.rotation.y = yaw;
     this.barGroup.position.set(x, BAR_HEIGHT, z);
+
+    if (this.castAge >= 0) {
+      this.castAge += dt;
+      if (this.castAge > CAST_GESTURE) this.castAge = -1;
+    }
+
+    this.animator.update(dt, {
+      speed: dt > 0 ? travelled / dt : 0,
+      travelled,
+      alive: this.alive,
+      castAge: this.castAge,
+      castDuration: CAST_GESTURE
+    });
+  }
+
+  /** Throw the cast gesture. Driven by the `S_CAST` packet, not by a flag. */
+  playCast(): void {
+    this.castAge = 0;
   }
 
   setHealth(hp: number, alive: boolean): void {
     const t = Math.max(0, Math.min(1, hp / MAX_HP));
     this.barFill.scale.x = Math.max(0.001, t);
-    // Drain from the right edge rather than from the middle.
-    this.barFill.position.x = -(1 - t) * 0.5;
+    this.barFill.position.x = -(1 - t) * 0.45;
 
     if (alive === this.alive) return;
     this.alive = alive;
-
-    const material = this.body.material as MeshStandardMaterial;
-    material.color.copy(alive ? this.baseColor : DEAD_COLOR);
-    this.wedge.visible = alive;
+    this.humanoid.material.color.copy(alive ? this.baseColor : DEAD_COLOR);
     this.barGroup.visible = alive;
-    // A corpse lies down. Cheapest possible death animation, and it reads
-    // instantly from a top-down camera where a colour change does not.
-    this.body.rotation.z = alive ? 0 : Math.PI * 0.5;
-    this.body.position.y = alive ? ACTOR_RADIUS + BODY_HEIGHT * 0.5 : ACTOR_RADIUS;
+    if (alive) this.castAge = -1;
   }
 
   faceCamera(camera: Camera): void {
     this.barGroup.quaternion.copy(camera.quaternion);
   }
 
+  /** Where this character's casting hand is, in world space. */
+  handPosition(out: { x: number; y: number; z: number }): void {
+    this.animator.handPosition(out);
+  }
+
   dispose(scene: Scene): void {
     scene.remove(this.group, this.barGroup);
-    for (const root of [this.group, this.barGroup]) {
-      root.traverse((node) => {
-        const mesh = node as Mesh;
-        mesh.geometry?.dispose();
-        (mesh.material as MeshStandardMaterial | undefined)?.dispose();
-      });
+    this.humanoid.dispose();
+    for (const node of this.barGroup.children) {
+      const mesh = node as Mesh;
+      mesh.geometry?.dispose();
+      (mesh.material as MeshBasicMaterial | undefined)?.dispose();
     }
   }
 }
@@ -132,10 +166,10 @@ export class ServerGhost {
 
   constructor() {
     this.mesh = new Mesh(
-      new CapsuleGeometry(ACTOR_RADIUS, BODY_HEIGHT, 4, 10),
+      new CapsuleGeometry(ACTOR_RADIUS, 1.1, 4, 10),
       new MeshBasicMaterial({ color: '#ff4d6d', wireframe: true, transparent: true, opacity: 0.55 })
     );
-    this.mesh.position.y = ACTOR_RADIUS + BODY_HEIGHT * 0.5;
+    this.mesh.position.y = ACTOR_RADIUS + 0.55;
     this.mesh.visible = false;
   }
 

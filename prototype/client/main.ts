@@ -156,6 +156,11 @@ function attemptCast(): void {
     true
   );
 
+  // Predict the gesture too, not only the effect: the body has to commit on the
+  // frame the key went down, or the spell reads as something that happened near
+  // the character rather than something they did.
+  actors.get(net.playerId)?.playCast();
+
   cooldowns.set(profile.id, performance.now() + profile.cooldown * 1000);
 
   const seq = ++castSeq;
@@ -263,6 +268,10 @@ net.onPacket((type, r) => {
       }
 
       spawnCast(profile, wire, false);
+      // Somebody else threw it — their body should throw it too. No animation
+      // state on the wire: the cast packet is the trigger, and it was going to
+      // be sent anyway.
+      if (wire.casterId !== net.playerId) actorFor(wire.casterId).playCast();
       break;
     }
 
@@ -332,25 +341,26 @@ function actorFor(id: number): Actor {
   return actor;
 }
 
-function updateActors(): void {
+function updateActors(dt: number): void {
   const serverNow = net.serverNow();
 
   // Us: the predicted position, drawn at "now".
   if (net.playerId) {
     const self = actorFor(net.playerId);
-    self.setTransform(predictor.state.x, predictor.state.z, predictor.state.yaw);
     self.setHealth(selfHp, selfAlive);
+    self.sync(predictor.state.x, predictor.state.z, predictor.state.yaw, dt);
     self.faceCamera(stage.camera);
     ghost.set(predictor.server.x, predictor.server.z);
   }
 
-  // Everyone else: interpolated, a tenth of a second behind.
+  // Everyone else: interpolated, a tenth of a second behind. Their gait comes
+  // out of that interpolation — nothing about the animation is replicated.
   for (const id of remotes.ids()) {
     const sample = remotes.sampleAt(id, serverNow);
     if (!sample) continue;
     const actor = actorFor(id);
-    actor.setTransform(sample.x, sample.z, sample.yaw);
     actor.setHealth(sample.hp, sample.alive);
+    actor.sync(sample.x, sample.z, sample.yaw, dt);
     actor.faceCamera(stage.camera);
   }
 }
@@ -425,7 +435,7 @@ function frame(): void {
   sampleInputs(dt);
   expirePredictions();
 
-  updateActors();
+  updateActors(dt);
   updateCasts();
 
   stage.follow(predictor.state.x, predictor.state.z, dt);
