@@ -792,5 +792,8 @@ npm run dev     # http://127.0.0.1:5173
 
 ---
 
-*Лицензия исходников: код предоставлен как есть для целей того проекта; HDR-проба
-и FBX персонажа сохраняют свои исходные лицензии.*
+*Лицензия: в репозитории лежит **MIT** (`LICENSE`, © 2026 mohamedachrefelouafi).
+Фраза в README «code is provided as-is for the purposes of this project»
+лицензией не является. HDR-проба (Poly Haven, CC0) и текстуры пола (ambientCG,
+CC0) свободны; FBX персонажа — Mixamo, условия Adobe. Подробнее — в разделе 0
+[документа про применимость к MMORPG](mmorpg-usable.md).*
